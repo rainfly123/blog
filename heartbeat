@@ -1,0 +1,408 @@
+#include <sys/select.h>
+#include <sys/types.h>
+#include <sys/socket.h>
+#include <string.h>
+#include <signal.h>
+#include <pthread.h>
+#include <stdio.h>
+#include <errno.h>
+#include <netinet/in.h>
+#include "heartbeat.h"
+#include "util.h"
+#include "gconf.h"
+#include "soooner_rtmp.h"
+
+#define LIVE_STOP 1
+#define LIVE_RUN 2
+
+static pthread_attr_t sThreadAttr;
+static const char *src_json_live_start = "{\"fromServer\":true, \"player\":1}";
+static const char *src_json_live_stop = "{\"fromServer\":true, \"player\":0}";
+
+static int _reconnect(int skt, struct sockinfo sock)
+{
+    int status ;
+    close(skt);
+    int fd = -1;
+
+    do {
+       fd = socket(AF_INET, SOCK_STREAM, 0);
+       sdk_set_tcpnodelay(fd);
+       sdk_set_nonblocking(fd);
+       sdk_set_keepalive(fd);
+       sdk_set_sndbuf(fd, 65535);
+
+       status = connect(fd, (struct sockaddr *)&sock.addr, sock.addrlen);
+       if (status != 0) {
+           if (errno != EINPROGRESS) {
+               close(fd);
+               continue;
+	   }
+       }
+       break;
+    } while (1);
+    return fd;
+}
+
+static void _heartbeat_restart(Handle handle)
+{
+
+    int status ;
+
+    do {
+       close(handle->skt);
+       handle->skt = socket(AF_INET, SOCK_STREAM, 0);
+       sdk_set_tcpnodelay(handle->skt);
+       sdk_set_nonblocking(handle->skt);
+       sdk_set_sndbuf(handle->skt, 65535);
+
+       status = connect(handle->skt, (struct sockaddr *)&handle->sock.addr, handle->sock.addrlen);
+       if (status != 0) {
+           if (errno != EINPROGRESS) {
+             continue;
+	   }
+       }
+       handle->done = 0;
+    } while (handle->done);
+}
+static void send_recv_cmd(Handle handle)
+{
+    struct timeval tv;
+    int json_len = strlen(src_json_live_start);
+    int val;
+    int max = handle->cmd_skt + 1;
+    int ret ;
+    int total = 0;
+    char temp[1024];
+    fd_set readfds;
+    fd_set writefds;
+    struct msg *buffer = &handle->cmd_buffer;
+    tv.tv_sec = 0;
+    tv.tv_usec = 500000;
+    char *body;
+    if (handle->send_cmd == 0) {
+    while (1) {
+        FD_ZERO(&writefds);
+        FD_SET(handle->cmd_skt, &writefds);
+        val = select(max, NULL, &writefds, NULL, &tv); 
+        if (val == 0) {
+            continue;
+        } else if (val < 0) {
+            handle->cmd_skt = _reconnect(handle->cmd_skt, handle->sock);
+            break;
+        }
+        //send
+        if (FD_ISSET(handle->cmd_skt, &writefds)) {
+            ret = send(handle->cmd_skt, buffer->data + total, (buffer->len - total), 0);
+            if (ret < 0){
+                if (errno == EINTR)
+                    continue;
+                if ((errno != EAGAIN) || (errno != EWOULDBLOCK)) {
+                   handle->cmd_skt = _reconnect(handle->cmd_skt, handle->sock);
+                   break;
+                }
+            }
+            if (ret > 0){
+                total += ret;
+		if (total == buffer->len) {
+		    total = 0;
+                    handle->send_cmd = 1;
+                    break;
+                }
+            }
+	} 
+   }
+   }
+   //recv
+   memset(temp, 0, sizeof(temp));
+   total = 0;
+   max = handle->cmd_skt + 1;
+   while (1) {
+        FD_ZERO(&readfds);
+        FD_SET(handle->cmd_skt, &readfds);
+        val = select(max, &readfds, NULL, NULL, &tv); 
+        if (val == 0) {
+            break; //timeout
+        } else if (val < 0) {
+            handle->cmd_skt = _reconnect(handle->cmd_skt, handle->sock);
+            handle->send_cmd = 0;
+            break;
+        }
+        if (FD_ISSET(handle->cmd_skt, &readfds)) {
+            ret = recv(handle->cmd_skt, temp+total , sizeof(temp)-total, 0);
+            if (ret == 0) {
+                handle->cmd_skt = _reconnect(handle->cmd_skt, handle->sock);
+                handle->send_cmd = 0;
+                break;
+            }
+	    else if (ret < 0){
+                if (errno == EINTR)
+                    continue;
+		if ((errno != EAGAIN) || (errno != EWOULDBLOCK)) {
+                    handle->cmd_skt = _reconnect(handle->cmd_skt, handle->sock);
+                    handle->send_cmd = 0;
+                    break;
+                }
+	    } else
+            {
+                total += ret;
+                printf("====%s\n", temp);
+                body = strstr(temp, "\r\n\r\n");
+                if (body != NULL) {
+                    handle->send_cmd = 0;
+                    body += 4;
+                    char *live = strstr(body, "live");
+                    if (live != NULL)
+                    {
+                        live += strlen("live");
+                        do {
+                            live++;
+                        }while ((*live != 't') && (*live != 'f'));
+                        if ((*live == 't') && (handle->state == LIVE_STOP)) {
+                            handle->callback(handle->rtmp, "userCmd", src_json_live_start, json_len, NULL, 0);
+                            handle->state = LIVE_RUN;
+                            break;
+                        }
+                        if ((*live == 'f') && (handle->state == LIVE_RUN)){
+                            handle->callback(handle->rtmp, "userCmd", src_json_live_stop, json_len, NULL, 0);
+                            handle->state = LIVE_STOP;
+                            break;
+                        }
+                    }
+                }
+            }
+	} 
+    }
+
+}
+
+static void recv_func(Handle handle)
+{
+    struct timeval tv;
+    int json_len = strlen(src_json_live_start);
+    int val;
+    int max = handle->skt + 1;
+    int ret ;
+    int total = 0;
+    char temp[1024];
+    fd_set readfds;
+    fd_set writefds;
+    struct msg *buffer = &handle->buffer;
+    tv.tv_sec = 0;
+    tv.tv_usec = 500000;
+    char *body;
+
+    while (1) {
+        FD_ZERO(&writefds);
+        FD_SET(handle->skt, &writefds);
+        val = select(max, NULL, &writefds, NULL, &tv); 
+        if (val == 0) {
+            continue;
+        } else if (val < 0) {
+            _heartbeat_restart(handle);
+            continue;
+        }
+        //send
+        if (FD_ISSET(handle->skt, &writefds)) {
+            ret = send(handle->skt, buffer->data + total, (buffer->len - total), 0);
+            if (ret < 0){
+                if (errno == EINTR)
+                    continue;
+                if ((errno != EAGAIN) || (errno != EWOULDBLOCK)) {
+                    handle->done = 1;
+                    _heartbeat_restart(handle);
+                }
+            }
+            if (ret > 0){
+                total += ret;
+		if (total == buffer->len) 
+		    total = 0;
+                    break;
+            }
+	} 
+   }
+   //recv
+   memset(temp, 0, sizeof(temp));
+   total = 0;
+   while (1) {
+        FD_ZERO(&readfds);
+        FD_SET(handle->skt, &readfds);
+        val = select(max, &readfds, NULL, NULL, &tv); 
+        if (val == 0) {
+            break; //timeout
+        } else if (val < 0) {
+            _heartbeat_restart(handle);
+            continue;
+        }
+        if (FD_ISSET(handle->skt, &readfds)) {
+            ret = recv(handle->skt, temp+total , sizeof(temp)-total, 0);
+            if (ret == 0) {
+                handle->done = 1;
+                _heartbeat_restart(handle);
+                break;
+            }
+	    else if (ret < 0){
+                if (errno == EINTR)
+                    continue;
+		if ((errno != EAGAIN) || (errno != EWOULDBLOCK)) {
+                    handle->done = 1;
+                    _heartbeat_restart(handle);
+                    break;
+                }
+	    } else
+            {
+                total += ret;
+                body = strstr(temp, "\r\n\r\n");
+                if (body != NULL) {
+                    body += 4;
+                    char *live = strstr(body, "live");
+                    if (live != NULL)
+                    {
+                        live += strlen("live");
+                        do {
+                            live++;
+                        }while ((*live != 't') && (*live != 'f'));
+                        if ((*live == 't') && (handle->state == LIVE_STOP)) {
+                            handle->callback(handle->rtmp, "userCmd", src_json_live_start, json_len, NULL, 0);
+                            handle->state = LIVE_RUN;
+                            break;
+                        }
+                        if ((*live == 'f') && (handle->state == LIVE_RUN)){
+                            handle->callback(handle->rtmp, "userCmd", src_json_live_stop, json_len, NULL, 0);
+                            handle->state = LIVE_STOP;
+                            break;
+                        }
+                    }
+                }
+            }
+	} 
+    }
+
+}
+
+static void *Entry (void *parameter)
+{
+    struct sigaction sa;
+    Handle handle = (Handle)parameter;
+    sa.sa_handler = SIG_IGN;
+    sigaction(SIGPIPE, &sa, 0);
+    uint32_t timer = 0;
+    bool send_heartbeat;
+    while (1) {
+        send_heartbeat = (timer % 30 == 0) ? true : false;
+        if (send_heartbeat) {
+            recv_func(handle);
+        }
+        //recv commands
+        send_recv_cmd(handle);
+        timer++;
+    }
+   return (void*)0;
+}
+
+//http://127.0.0.1:1935/abc
+Handle sdk_heartbeat_init(char *url, RTMPUserInvoke cb, void *data) 
+{
+    Handle handle ; 
+    int val;
+    int status;
+    char *port;
+    char *ip;
+    char *loc;
+    char ip_addr[64];
+    int sport = 80;
+    char location[32];
+    handle = sdk_calloc(1, sizeof(heartbeat));
+
+    pthread_attr_init(&sThreadAttr);
+    pthread_attr_setscope(&sThreadAttr, PTHREAD_SCOPE_SYSTEM);
+
+    ASSERT(url != NULL);
+    memset(ip_addr, 0, sizeof(ip_addr));
+    memset(location, 0, sizeof(location));
+
+    ip = strstr(url, "http://");
+    if (ip == NULL) {
+        sdk_free(handle);
+        return NULL;
+    }
+    ip += strlen("http://");
+
+    port = strchr(ip, ':');
+    if (port != NULL) {
+        strncpy(ip_addr, ip, port - ip);
+        port += 1;
+        sport = sdk_atoi(port, 5);
+    } else {
+        port = strchr(ip, '/');
+        strncpy(ip_addr, ip, port - ip);
+    }
+    loc = strchr(port, '/');
+    if (loc != NULL) {
+       strncpy(location, loc, sizeof(location));
+    }
+    val = sdk_resolve(ip_addr, sport, &handle->sock);
+    if (val < 0) {
+        sdk_free(handle);
+        return NULL;
+    }
+    handle->callback = cb;
+    handle->rtmp = data;
+    handle->state = LIVE_STOP;
+#define BUFF_LEN 512
+#define CONTROL "/control"
+    handle->buffer.data = sdk_calloc(1, BUFF_LEN);
+    handle->buffer.len = snprintf((char*)handle->buffer.data, BUFF_LEN,\
+            "GET %s?camid=%s HTTP/1.1\r\nConnection: keep-alive\r\nHost: %s\r\n\r\n", \
+             location, camera_id, ip_addr);
+
+    handle->cmd_buffer.data = sdk_calloc(1, BUFF_LEN);
+    handle->cmd_buffer.len = snprintf((char*)handle->cmd_buffer.data, BUFF_LEN,\
+            "GET %s?camid=%s HTTP/1.1\r\nConnection: keep-alive\r\nHost: %s\r\n\r\n", \
+             CONTROL, camera_id, ip_addr);
+
+
+    handle->skt = _reconnect(-1, handle->sock);
+    if (handle->skt < 0) {
+        sdk_free(handle);
+        return NULL;
+    }
+    handle->cmd_skt = _reconnect(-1, handle->sock);
+    if (handle->cmd_skt < 0) {
+        sdk_free(handle);
+        return NULL;
+    }
+    pthread_create(&handle->thread, &sThreadAttr, Entry, handle);
+    return handle;
+}
+
+
+void sdk_heart_close(Handle handle)
+{
+    void *res;
+
+    ASSERT(handle != NULL);
+
+    sdk_free(handle->buffer.data);
+    pthread_cancel(handle->thread);
+    pthread_join(handle->thread, &res);
+    sdk_free(handle);
+}
+
+#if 0
+int call(void *cb_ctx, const char* cmd, const char *src, int len, char* dst, int dst_len){
+ char *p = (char*)cb_ctx;
+ printf("user parameter:%s\n", p);
+ printf("cmd: %s\n", src);
+}
+int main(int argc, char **argv)
+{
+  sdk_set_cameraid("137892614667");
+  Handle hl;
+  hl = sdk_heartbeat_init("http://i.cam.soooner.com/heartbeat.do", \
+                       call, "nihao");
+  while (1) {
+     sleep(1000);
+  }
+}
+#endif

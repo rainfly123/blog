@@ -10,7 +10,7 @@
 #include "heartbeat.h"
 #include "util.h"
 #include "gconf.h"
-#include "soooner_rtmp.h"
+
 
 #define LIVE_STOP 1
 #define LIVE_RUN 2

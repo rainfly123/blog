@@ -35,11 +35,13 @@ float mp4_duration(char *file)
     while (1) {
         val = read(fd, &size, sizeof(size));
         if (val < sizeof(size)) {
+            close(fd);
             return -1;
         }
         size = ntoh(size);
         val = read(fd, type, sizeof(type));
         if (val < sizeof(type)) {
+            close(fd);
             return -1;
         }
         if (memcmp(type, moov, strlen(moov)) != 0) {
@@ -50,22 +52,26 @@ float mp4_duration(char *file)
     while (1) {
         val = read(fd, &size, sizeof(size));
         if (val < sizeof(size)) {
+            close(fd);
             return -1;
         }
         size = ntoh(size);
         val = read(fd, type, sizeof(type));
         if (val < sizeof(type)) {
+            close(fd);   
             return -1;
         }
         if (memcmp(type, mvhd, strlen(mvhd)) == 0) {
             lseek(fd, 12, SEEK_CUR);
             val = read(fd, &time_scale, sizeof(time_scale));
             if (val < sizeof(time_scale)) {
+                close(fd);
                 return -1;
             }
             time_scale = ntoh(time_scale);
             val = read(fd, &duration, sizeof(duration));
             if (val < sizeof(duration)) {
+                close(fd);
                 return -1;
             }
             duration = ntoh(duration);

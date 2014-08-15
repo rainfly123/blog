@@ -4,6 +4,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <stdlib.h>
+#include <pthread.h>
 #include <ctype.h>
 #include <stdio.h>
 #include <errno.h>
@@ -12,6 +13,9 @@
 #include <sys/socket.h>
 #include <sys/ioctl.h>
 #include <sys/un.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
 #include "util.h"
 #include "md5.h"
 
@@ -85,7 +89,7 @@ static int ipc_send(int skt, char *buf, int len)
     return 0;
 }
 
-int get_server (char *obdid, char *token, char *ip, int *port, char *address)
+static int get_server (char *obdid, char *token, char *ip, int *port, char *address)
 {
     char *ntp = "i.auto.soooner.com";
     struct sockinfo sock;
@@ -161,13 +165,13 @@ ReRecv:
 #define METHOD "POST /%s?obdid=%s&eventid=%s&token=%s&md5=%s&cameraid=%s HTTP/1.0\r\n"
 #define USER_AGENT  "User-Agent: SOOONER-SDK-xiecc\r\n"
 #define CON_LEN "Content-Length: %d\r\n"
-#define CON_TYPE  "Content-Type: multipart/form-data; boundary=------soooner\r\n\r\n"
+#define CON_TYPE  "Content-Type: multipart/form-data; boundary=------xiecc\r\n\r\n"
 
-#define BOUNDARY_S "--------soooner\r\n"
+#define BOUNDARY_S "--------xiecc\r\n"
 #define FILE_NAME "Content-Disposition: form-data; name=\"file\"; filename=\"%s\"\r\n"
 #define FILE_TYPE_JPG "Content-Type: image/jpeg\r\n\r\n"
 #define FILE_TYPE_MP4 "Content-Type: video/mp4\r\n\r\n"
-#define BOUNDARY_E "\r\n--------soooner--\r\n"
+#define BOUNDARY_E "\r\n--------xiecc--\r\n"
 static int http_post_jpg(char *file, char *obdid, char *token, char *eventid, char *cameraid, 
                           char *ip, int port, char *address)
 {
@@ -177,7 +181,7 @@ static int http_post_jpg(char *file, char *obdid, char *token, char *eventid, ch
     struct stat stat;
     char temp[8];
     int len;
-    void *data;
+    char *data;
     ssize_t val;
     char md5[48];
 
@@ -188,11 +192,11 @@ static int http_post_jpg(char *file, char *obdid, char *token, char *eventid, ch
         return -1;
     }
     fstat(fd, &stat);
-    data = malloc(512 + stat.st_size);
+    data = (char *) malloc(512 + stat.st_size);
     memset(data, 0, (512 + stat.st_size));
     len = sprintf(data, METHOD, address, obdid, eventid, token, md5, cameraid);
     len += sprintf(data + len, USER_AGENT);
-    len += sprintf(data + len, CON_LEN, bound_len + stat.st_size);
+    len += sprintf(data + len, CON_LEN, bound_len + (int)stat.st_size);
     len += sprintf(data + len, CON_TYPE);
     len += sprintf(data + len, BOUNDARY_S);
     len += sprintf(data + len, FILE_NAME, file);
@@ -213,9 +217,7 @@ static int http_post_jpg(char *file, char *obdid, char *token, char *eventid, ch
         return -1;
     res = ipc_send(skt, (char *)data, len);
     close(skt);
-    printf("%s %d\n", data, strlen(data));
     free(data);
-    printf("%d\n", len);
     return res;
 }
 static int http_post_mp4(char *file, char *obdid, char *token, char *eventid, char *cameraid, 
@@ -227,7 +229,7 @@ static int http_post_mp4(char *file, char *obdid, char *token, char *eventid, ch
     struct stat stat;
     char temp[8];
     int len;
-    void *data;
+    char *data;
     ssize_t val;
     char md5[48];
 
@@ -238,12 +240,12 @@ static int http_post_mp4(char *file, char *obdid, char *token, char *eventid, ch
         return -1;
     }
     fstat(fd, &stat);
-    data = malloc(512 + stat.st_size);
+    data = (char *) malloc(512 + stat.st_size);
     memset(data, 0, (512 + stat.st_size));
     len = sprintf(data, METHOD, address, obdid, eventid, token, md5, cameraid);
     len += sprintf(data + len, USER_AGENT);
+    len += sprintf(data + len, CON_LEN, bound_len + (int)stat.st_size);
     len += sprintf(data + len, CON_TYPE);
-    len += sprintf(data + len, CON_LEN, bound_len + stat.st_size);
     len += sprintf(data + len, BOUNDARY_S);
     len += sprintf(data + len, FILE_NAME, file);
     len += sprintf(data + len, FILE_TYPE_MP4);
@@ -263,19 +265,109 @@ static int http_post_mp4(char *file, char *obdid, char *token, char *eventid, ch
         return -1;
     res = ipc_send(skt, (char *)data, len);
     close(skt);
-    printf("%s %d\n", data, strlen(data));
     free(data);
-    printf("%d\n", len);
     return res;
 }
 //int http_post_jpg()
 //int http_post_jpg()
-int main(){
+/*
+int main(void){
 char ip[48];
 int port;
 char address[48];
 get_server ("testobd01", "bWrJoFRfpoRxOO7HoWYM0NLDcLqyJccPmyjlyNKGNRw",ip, &port, address);
 printf("%s %s %d\n", ip, address, port);
+http_post_mp4("1407171636_0001_thm.mp4" , "testobd01", "bWrJoFRfpoRxOO7HoWYM0N7uxaSawckGC8a2Z9yDkxM",\
+  "201408", "800", ip, port, address);
 http_post_jpg("1407171636_0001.jpg" , "testobd01", "bWrJoFRfpoRxOO7HoWYM0N7uxaSawckGC8a2Z9yDkxM",\
   "201408", "800", ip, port, address);
+}
+*/
+struct data {
+    char *file;
+    char *obdid;
+    char *token; 
+    char *eventid;
+    char *cameraid;
+};
+
+
+static void * http_post_thread(void *data)
+{
+    char ip[48];
+    char address[48];
+    int port;
+    int val;
+    char *type ;
+    struct data *p = (struct data *)data;
+    int tryy = 1;
+
+    pthread_detach(pthread_self());
+
+    do {
+        val = get_server (p->obdid, p->token, ip, &port, address);
+        if (val == 0) 
+             break;
+        sleep((tryy * 10));
+        tryy++;
+    } while (tryy <= 3);
+
+    if (tryy >= 4) {
+        free(p->cameraid);
+        free(p->eventid);
+        free(p->token);
+        free(p->obdid);
+        free(p->file);
+        free(p);
+        return (void *)0;
+    }
+
+    tryy = 1;
+    type = strstr(p->file, "mp4"); 
+    do {
+        if (type != NULL)
+           val = http_post_mp4(p->file, p->obdid, p->token, p->eventid, p->cameraid, ip, port, address);
+       else
+           val = http_post_jpg(p->file, p->obdid, p->token, p->eventid, p->cameraid, ip, port, address);
+       if (val == 0)
+           break;
+        sleep((tryy * 10));
+        tryy++;
+    } while (tryy <= 5);
+
+    free(p->cameraid);
+    free(p->eventid);
+    free(p->token);
+    free(p->obdid);
+    free(p->file);
+    free(p);
+    return (void *)0;
+}
+
+int http_post_start(char *file, char *obdid, char *token, char *eventid, char *cameraid)
+{
+    struct data *p;
+    pthread_t tid;
+
+    if (file == NULL)
+       return -1;
+    if (obdid == NULL)
+       return -1;
+    if (token == NULL)
+       return -1;
+    if (eventid == NULL)
+       return -1;
+    if (cameraid == NULL)
+       return -1;
+    if (access(file, R_OK) != 0)
+       return -1;
+
+    p = calloc(1, sizeof(struct data)); 
+    p->file =  strdup(file);
+    p->obdid =  strdup(obdid);
+    p->token =  strdup(token);
+    p->eventid =  strdup(eventid);
+    p->cameraid =  strdup(cameraid);
+    pthread_create(&tid, NULL, http_post_thread, p);
+    return 0;
 }

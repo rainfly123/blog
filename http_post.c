@@ -96,7 +96,7 @@ static int ipc_send(int skt, char *buf, int len)
 
 static int get_server (char *obdid, char *token, char *ip, int *port, char *address)
 {
-    char *ntp = "i.auto.soooner.com";
+    char *ntp = "----------------------";
     struct sockinfo sock;
     int skt;
     int mess_len;
@@ -168,7 +168,7 @@ ReRecv:
 
 
 #define METHOD "POST /%s?obdid=%s&eventid=%s&token=%s&md5=%s&cameraid=%s HTTP/1.0\r\n"
-#define USER_AGENT  "User-Agent: SOOONER-SDK-xiecc\r\n"
+#define USER_AGENT  "User-Agent: xiecc\r\n"
 #define CON_LEN "Content-Length: %d\r\n"
 #define CON_TYPE  "Content-Type: multipart/form-data; boundary=------xiecc\r\n\r\n"
 
@@ -558,8 +558,8 @@ int main()
  char *obdid = "testobd01";
  char *cameraid = "camera1";
  int c;
- //http_post_start("08301519_0004.jpg", obdid, token, "200230", cameraid, 1);
- http_post_start("08051400_0233_thm.mp4", obdid, token, "200230", cameraid, 1, "./");
+ //http_post_start("08301519.jpg", obdid, token, "200230", cameraid, 1);
+ http_post_start("08051400.mp4", obdid, token, "200230", cameraid, 1, "./");
  c = getchar();
 }
 #endif

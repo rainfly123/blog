@@ -15,3 +15,5 @@ then you can call the instance as if the instance is a function
 2、申请表格+申请指南：http://t.cn/8sEVsee
 3、申请进度超级大表已开放，已寄出的同学请前往登记：http://visa.gamebottle.com 
 4、严禁发布其他群号，违者一律清理
+package：http://www.cic.gc.ca/english/information/applications/skilled.asp
+http://www.cic.gc.ca/english/information/applications/guides/EG7TOC.asp#eg74
